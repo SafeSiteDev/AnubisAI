@@ -118,59 +118,72 @@ def get_batch(source, i, bptt):
     target = source[i+1:i+1+seq_len].reshape(-1)
     return data, target
 
-# Reduce model size for mobile (fewer layers, smaller embedding size)
-ntokens = len(vocab.stoi)  # the size of vocabulary
-emsize = 256  # smaller embedding dimension
-nhid = 128  # smaller feedforward network dimension
-nlayers = 6  # fewer layers
-nhead = 2  # number of heads in multiheadattention
-dropout = 0.2
-bptt = 200  # shorter sequence length for efficiency
-device = torch.device("cpu")
-
-model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout).to(device)
-
-criterion = nn.CrossEntropyLoss()
-lr = 2.0  # lower learning rate
-optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-
-def train_model(model, train_data, bptt, criterion, optimizer, device, ntokens, epoch):
+def train(model, train_data, batch_size, bptt, optimizer, criterion, clip):
     model.train()
     total_loss = 0.
     start_time = time.time()
-    for batch, i in enumerate(range(0, train_data.size(0) - 1, bptt)):
+    for batch, i in enumerate(range(0, len(train_data) - 1, bptt)):
         data, targets = get_batch(train_data, i, bptt)
         optimizer.zero_grad()
         output = model(data)
-        loss = criterion(output.view(-1, ntokens), targets)
+        loss = criterion(output.view(-1, len(vocab)), targets)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
-        optimizer.step()
-
         total_loss += loss.item()
+        nn.utils.clip_grad_norm_(model.parameters(), clip)
+        optimizer.step()
         if batch % 200 == 0 and batch > 0:
             cur_loss = total_loss / 200
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | '
-                  'loss {:5.2f} | ppl {:8.2f}'.format(
-                    epoch, batch, len(train_data) // bptt,
-                    cur_loss, math.exp(cur_loss)))
+            print(f'| batch {batch:3d} | loss {cur_loss:5.2f} | time {elapsed:5.2f}s')
             total_loss = 0
             start_time = time.time()
 
-def evaluate(model, val_data, bptt, criterion, device, ntokens):
+def evaluate(model, val_data, batch_size, bptt, criterion):
     model.eval()
     total_loss = 0.
     with torch.no_grad():
         for i in range(0, len(val_data) - 1, bptt):
             data, targets = get_batch(val_data, i, bptt)
             output = model(data)
-            output_flat = output.view(-1, ntokens)
-            total_loss += len(data) * criterion(output_flat, targets).item()
-    return total_loss / (len(val_data) - 1)
+            total_loss += criterion(output.view(-1, len(vocab)), targets).item()
+    return total_loss / (len(val_data) // bptt)
+
+# Hyperparameters
+ntokens = len(vocab)
+emsize = 200
+nhid = 200
+nlayers = 2
+nhead = 2
+dropout = 0.2
+bptt = 35
+lr = 5.0
+epochs = 3
+clip = 0.25
+
+# Initialize the model
+model = TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
+optimizer = optim.Adam(model.parameters(), lr=lr)
+criterion = nn.CrossEntropyLoss()
+
+# Early stopping setup
+early_stopping = EarlyStopping(patience=early_stopping_patience, verbose=True, path=best_model_path)
 
 # Training loop
-best_model = run_main_loop(model, train_data, val_data, bptt, criterion, optimizer, scheduler, device, ntokens)
+for epoch in range(epochs):
+    epoch_start_time = time.time()
+    train(model, train_data, batch_size, bptt, optimizer, criterion, clip)
+    val_loss = evaluate(model, val_data, batch_size, bptt, criterion)
+    print(f'| epoch {epoch+1:3d} | time {time.time() - epoch_start_time:5.2f}s | val_loss {val_loss:5.2f}')
+    
+    # Early stopping
+    early_stopping(val_loss, model)
+    if early_stopping.early_stop:
+        print("Early stopping")
+        break
 
-# Save the best model
-torch.save(best_model.state_dict(), best_model_path)
+# Load the best model
+model.load_state_dict(torch.load(best_model_path))
+
+# Test the model
+test_loss = evaluate(model, test_data, batch_size, bptt, criterion)
+print(f'Test loss: {test_loss:.2f}')
