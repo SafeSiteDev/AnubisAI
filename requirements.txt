@@ -1,0 +1,4 @@
+torch==<version>
+torchtext==<version>
+flask==<version>  # If you're using Flask or a similar framework to serve the script
+requests==<version>
